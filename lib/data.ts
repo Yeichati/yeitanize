@@ -4,10 +4,11 @@ export type Cell = string | number | boolean | null;
 export type Row = Record<string, Cell>;
 export type Dataset = {name:string; format:string; columns:string[]; rows:Row[]};
 export type Loaded = {name:string; format:string; sheets:Record<string,Dataset>};
-export type ColumnTreatment = 'keep'|'remove'|'geo'|'age'|'salary';
+export type ColumnTreatment = 'keep'|'remove'|'geo'|'age'|'salary'|'date';
 export const ID='pseudonymized_id';
 export const LEGACY_ID='anonymized_id';
 export const PSEUDONYMIZED_SUFFIX='_pseudonymized';
+export const ANONYMOUS_ID='anonymous_id';
 
 const REGION_NAMES:Record<string,string>={
  '01':'Guadeloupe','02':'Martinique','03':'Guyane','04':'La Réunion','06':'Mayotte','11':'Île-de-France','24':'Centre-Val de Loire','27':'Bourgogne-Franche-Comté','28':'Normandie','32':'Hauts-de-France','44':'Grand Est','52':'Pays de la Loire','53':'Bretagne','75':'Nouvelle-Aquitaine','76':'Occitanie','84':'Auvergne-Rhône-Alpes','93':'Provence-Alpes-Côte d’Azur','94':'Corse'
@@ -95,23 +96,58 @@ function generalizeSalary(value:Cell):Cell{
  const n=toNumber(value);if(n===null||n<0)return value;
  const low=Math.floor(n/5000)*5000;return `${low.toLocaleString('fr-FR')} - ${(low+5000).toLocaleString('fr-FR')}`;
 }
+function generalizeDate(value:Cell):Cell{
+ if(value===null||value===undefined||value==='')return value;
+ if(typeof value==='number'){
+  const d=new Date(Math.round((value-25569)*86400*1000));
+  return Number.isNaN(d.getTime())?value:String(d.getUTCFullYear());
+ }
+ const raw=String(value).trim();
+ const year=raw.match(/(?:^|\D)((?:19|20)\d{2})(?:\D|$)/)?.[1];
+ if(year)return year;
+ const d=new Date(raw);
+ return Number.isNaN(d.getTime())?value:String(d.getFullYear());
+}
+function postalToDepartmentCode(raw:string):string|null{
+ const postal=raw.replace(/\s/g,'');
+ if(!/^\d{5}$/.test(postal))return null;
+ const overseas=postal.slice(0,3);
+ if(['971','972','973','974','976'].includes(overseas))return overseas;
+ if(postal.startsWith('20')){
+  const n=Number(postal);
+  if(n>=20000&&n<=20199)return '2A';
+  if(n>=20200&&n<=20699)return '2B';
+  return null;
+ }
+ const code=postal.slice(0,2);
+ return DEP_BY_CODE.has(code)?code:null;
+}
 async function generalizeGeoValues(values:Cell[]):Promise<Cell[]>{
  const parsed=values.map(v=>typeof v==='string'||typeof v==='number'?String(v).trim():'');
- const allDepartmentLike=parsed.every(v=>!v||DEP_BY_CODE.has(v.toUpperCase())||DEP_BY_NAME.has(normalizeText(v)));
- if(allDepartmentLike){
-  return parsed.map((v,i)=>{
-   if(!v)return values[i];
-   const dep=DEP_BY_CODE.get(v.toUpperCase())||DEP_BY_NAME.get(normalizeText(v));
-   return dep?REGION_NAMES[dep.region]||dep.region:values[i];
-  });
- }
- const communes=await loadCommuneIndex();
- return parsed.map((v,i)=>{
+ const unresolvedCityIndexes:number[]=[];
+ const out:Cell[]=parsed.map((v,i)=>{
   if(!v)return values[i];
-  const depCode=communes.get(normalizeText(v));
-  if(!depCode)return depCode===null?'Commune ambiguë':values[i];
-  return DEP_BY_CODE.get(depCode)?.name||depCode;
+  const postalDep=postalToDepartmentCode(v);
+  if(postalDep)return DEP_BY_CODE.get(postalDep)?.name||postalDep;
+  const dep=DEP_BY_CODE.get(v.toUpperCase())||DEP_BY_NAME.get(normalizeText(v));
+  if(dep)return REGION_NAMES[dep.region]||dep.region;
+  unresolvedCityIndexes.push(i);
+  return values[i];
  });
+ if(!unresolvedCityIndexes.length)return out;
+ const communes=await loadCommuneIndex();
+ for(const i of unresolvedCityIndexes){
+  const depCode=communes.get(normalizeText(parsed[i]));
+  if(depCode)out[i]=DEP_BY_CODE.get(depCode)?.name||depCode;
+  else if(depCode===null)out[i]='Commune ambiguë';
+ }
+ return out;
+}
+function transformValues(treatment:ColumnTreatment,values:Cell[]):Promise<Cell[]>|Cell[]{
+ if(treatment==='age')return values.map(generalizeAge);
+ if(treatment==='salary')return values.map(generalizeSalary);
+ if(treatment==='date')return values.map(generalizeDate);
+ return generalizeGeoValues(values);
 }
 export async function pseudonymize(data:Dataset,treatments:Record<string,ColumnTreatment>){
  if(data.columns.includes(ID)||data.columns.includes(LEGACY_ID)) throw Error('Une colonne d’identifiant de pseudonymisation existe déjà. Renommez-la avant de commencer.');
@@ -131,7 +167,7 @@ export async function pseudonymize(data:Dataset,treatments:Record<string,ColumnT
  for(const c of data.columns){
   const treatment=treatments[c]||'keep';if(treatment==='keep'||treatment==='remove')continue;
   const values=data.rows.map(r=>r[c]??null);
-  transformedByColumn[c]=treatment==='age'?values.map(generalizeAge):treatment==='salary'?values.map(generalizeSalary):await generalizeGeoValues(values);
+  transformedByColumn[c]=await transformValues(treatment,values);
  }
  const pseudoRows:Row[]=mappingRows.map((r,rowIndex)=>{
   const out:Row={[ID]:r[ID]};
@@ -142,6 +178,35 @@ export async function pseudonymize(data:Dataset,treatments:Record<string,ColumnT
   return out;
  });
  return {mapping:{...data,columns:[ID,...data.columns],rows:mappingRows},pseudonymized:{...data,columns:pseudoColumns,rows:pseudoRows}};
+}
+export async function anonymize(data:Dataset,treatments:Record<string,ColumnTreatment>){
+ if(data.columns.includes(ANONYMOUS_ID))throw Error('Une colonne anonymous_id existe déjà. Renommez-la avant de commencer.');
+ const selected=data.columns.filter(c=>(treatments[c]||'keep')!=='keep');
+ if(!selected.length)throw Error('Sélectionnez au moins une colonne à retirer ou généraliser.');
+ const transformedByColumn:Record<string,Cell[]>=Object.create(null);
+ for(const c of data.columns){
+  const treatment=treatments[c]||'keep';
+  if(treatment==='keep'||treatment==='remove')continue;
+  transformedByColumn[c]=await transformValues(treatment,data.rows.map(r=>r[c]??null));
+ }
+ const used=new Set<string>();
+ const rows:Row[]=data.rows.map((r,rowIndex)=>{
+  let id=newAnonymousId();while(used.has(id))id=newAnonymousId();used.add(id);
+  const out:Row={[ANONYMOUS_ID]:id};
+  for(const c of data.columns){
+   const treatment=treatments[c]||'keep';
+   if(treatment==='remove')continue;
+   out[c]=treatment==='keep'?(r[c]??null):(transformedByColumn[c][rowIndex]??null);
+  }
+  return out;
+ });
+ const columns=[ANONYMOUS_ID,...data.columns.filter(c=>(treatments[c]||'keep')!=='remove')];
+ return {...data,columns,rows};
+}
+export function newAnonymousId(){
+ const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+ let key='';while(key.length<20){for(const n of crypto.getRandomValues(new Uint8Array(32))){if(n<248)key+=chars[n%62];if(key.length===20)break;}}
+ return 'anon_'+key;
 }
 function findIdColumn(data:Dataset){
  if(data.columns.includes(ID))return ID;
