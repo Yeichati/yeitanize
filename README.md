@@ -5,20 +5,22 @@ POC React / TypeScript de pseudonymisation réversible, aux couleurs et typograp
 ## Utilisation
 
 1. Importer CSV, JSON, XLS ou XLSX. Pour Excel, choisir la feuille.
-2. Sélectionner manuellement les colonnes à retirer et vérifier l'aperçu.
+2. Choisir pour chaque colonne si elle doit être conservée, retirée ou pseudonymisée (Géo, Âge, Salaire).
 3. Télécharger le fichier pseudonymisé et le mapping. Ne jamais envoyer le mapping à une IA.
-4. Demander à l'IA de conserver `anonymized_id` exactement.
+4. Demander à l'IA de conserver `pseudonymized_id` exactement.
 5. Réimporter mapping et résultat dans Restaurer, vérifier le bilan puis exporter.
 
 Les fichiers sont traités en mémoire côté navigateur, sans envoi à un serveur, analytics, stockage local ou base de données. Rafraîchir la page efface les données en mémoire. Les ressources de l'interface et polices sont servies localement au site. Le site utilise React avec Vite et une sortie statique.
 
 ## Règles du POC
 
-- Une ligne = un identifiant indépendant, préfixe `anon_` et 24 caractères alphanumériques aléatoires via Web Crypto. Casse significative, contrôle d'unicité dans le traitement.
+- Une ligne = un identifiant indépendant, préfixe `pseudo_` et 24 caractères alphanumériques aléatoires via Web Crypto. Casse significative, contrôle d'unicité dans le traitement.
 - CSV UTF-8, JSON tabulaire plat, valeurs Excel uniquement. Pas de conservation des styles, formules, macros ou autres feuilles dans les exports.
 - Maximum 20 Mo, 100 000 lignes, 500 colonnes. XLS : maximum 65 535 lignes de données et 256 colonnes.
 - Les identifiants vides ou dupliqués bloquent la restauration entière ; aucun appariement approximatif.
 - Toutes les lignes du mapping sont conservées ; résultats manquants = champs IA vides ; identifiants inconnus exclus avec signalement.
+- Les colonnes transformées portent le suffixe `_pseudonymized`. Lors de la restauration, elles disparaissent si la colonne originale correspondante est présente dans le mapping.
+- Géo réduit une ville en département et un département en région ; Âge et Salaire réduisent les valeurs exactes en tranches.
 - Les colonnes IA en conflit sont renommées `_ai`, `_ai_2`, etc. Toutes les colonnes du résultat IA sont conservées, même inchangées.
 - JSON et XLSX préservent les chaînes pouvant ressembler à des formules. CSV les préfixe d'une apostrophe pour éviter leur exécution à l'ouverture dans un tableur.
 - La suppression manuelle de colonnes ne garantit pas l'anonymat des données restantes.
@@ -42,7 +44,7 @@ npm run build
 npm run preview
 ```
 
-`dist/` contient également une version déjà compilée. Elle doit être servie via un serveur HTTP local (et non ouverte en double-cliquant sur index.html).
+`dist/` est généré par `npm run build`. Le zip source ne contient pas de build précompilé afin d’éviter de livrer une version obsolète.
 
 Tests : aller-retour de 100 lignes dans les quatre formats, caractères spéciaux, zéros initiaux, réordonnancement, conflits de colonnes, identifiants inconnus, doublons, sensibilité à la casse, JSON imbriqué et en-têtes dupliqués.
 
